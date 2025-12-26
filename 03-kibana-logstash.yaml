@@ -1,0 +1,97 @@
+# --- KIBANA ---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: elk
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kibana
+  template:
+    metadata:
+      labels:
+        app: kibana
+    spec:
+      containers:
+      - name: kibana
+        image: docker.elastic.co/kibana/kibana:8.14.0
+        ports:
+        - containerPort: 5601
+        env:
+        - name: ELASTICSEARCH_HOSTS
+          value: "http://elasticsearch:9200"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana
+  namespace: elk
+spec:
+  selector:
+    app: kibana
+  type: NodePort # Para acceder desde fuera del cluster
+  ports:
+    - port: 5601
+      targetPort: 5601
+      nodePort: 30601 # Puerto fijo para fácil acceso
+
+# --- LOGSTASH ---
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logstash
+  namespace: elk
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: logstash
+  template:
+    metadata:
+      labels:
+        app: logstash
+    spec:
+      containers:
+      - name: logstash
+        image: docker.elastic.co/logstash/logstash:8.14.0
+        ports:
+        - containerPort: 5044
+        - containerPort: 5000
+        - containerPort: 5001
+        - containerPort: 9600
+        - containerPort: 4317
+          name: otlp-grpc
+        env:
+        - name: xpack.monitoring.enabled
+          value: "false"
+        volumeMounts:
+        - name: pipeline-volume
+          mountPath: /usr/share/logstash/pipeline
+      volumes:
+      - name: pipeline-volume
+        configMap:
+          name: logstash-pipeline
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: logstash
+  namespace: elk
+spec:
+  selector:
+    app: logstash
+  ports:
+    - port: 5044
+      name: beats
+    - port: 5000
+      name: tcp-udp
+      protocol: TCP
+    - port: 5001
+      name: udp-input
+      protocol: UDP
+    - port: 4317
+      name: otlp-grpc
+      protocol: TCP  

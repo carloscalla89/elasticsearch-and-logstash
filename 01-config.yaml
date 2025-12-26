@@ -1,0 +1,110 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: elk
+---
+# Este ConfigMap reemplaza tu volumen local "./logstash/pipeline"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-pipeline
+  namespace: elk
+data:
+  logstash.conf: |
+    input {
+      beats { port => 5044 }
+      http {
+        port => 5000 
+        codec => json
+      }
+    }
+
+    filter {
+      # Lógica para transformar el formato OTLP anidado en documentos planos
+      if [resourceLogs] {
+        
+        # 1. Romper la estructura jerárquica
+        split { field => "resourceLogs" }
+        split { field => "[resourceLogs][scopeLogs]" }
+        split { field => "[resourceLogs][scopeLogs][logRecords]" }
+
+        # 2. BLOQUE RUBY UNIFICADO (Aquí está la corrección)
+        ruby {
+          code => "
+            # A. Fecha (Igual que antes)
+            path_time = '[resourceLogs][scopeLogs][logRecords][timeUnixNano]'
+            nanos = event.get(path_time)
+            if nanos
+              millis = nanos.to_i / 1000000
+              event.set('temp_ts_millis', millis)
+            end
+
+            # B. Service Name (Igual que antes)
+            attrs = event.get('[resourceLogs][resource][attributes]')
+            if attrs.is_a?(Array)
+              attrs.each do |attr|
+                if attr['key'] == 'service.name'
+                  event.set('service_name', attr['value']['stringValue'])
+                end
+              end
+            end
+
+            # C. TRACE ID y SPAN ID (NUEVO: Extracción Segura)
+            # Usamos Ruby para obtener el valor. Si es nulo, no hacemos nada.
+            tid = event.get('[resourceLogs][scopeLogs][logRecords][traceId]')
+            if tid
+              event.set('traceId', tid)
+            end
+
+            sid = event.get('[resourceLogs][scopeLogs][logRecords][spanId]')
+            if sid
+              event.set('spanId', sid)
+            end
+          "
+        }
+
+        # 3. Aplicar fecha usando el valor calculado (Milisegundos)
+        date {
+          match => [ "temp_ts_millis", "UNIX_MS" ]
+          target => "@timestamp"
+        }
+
+        # 4. Mutate (YA NO agregamos traceId aquí para evitar el texto basura)
+        mutate {
+          replace => { 
+            "message" => "%{[resourceLogs][scopeLogs][logRecords][body][stringValue]}" 
+          }
+          add_field => { 
+            "log_level" => "%{[resourceLogs][scopeLogs][logRecords][severityText]}"
+            # Nota: traceId y spanId ya se agregaron arriba con Ruby si existían
+          }
+        }
+
+        # 5. FILTRO DE EXCLUSIÓN (Ahora sí funcionará)
+        # Si 'traceId' no fue creado por Ruby (porque era nulo), esta condición será TRUE
+        if ![traceId] {
+          drop { }
+        }
+
+        # 6. Limpieza final (Prune)
+        prune {
+          whitelist_names => [ 
+            "^@timestamp$", 
+            "^message$", 
+            "^log_level$", 
+            "^traceId$", 
+            "^spanId$", 
+            "^service_name$"
+          ]
+        }
+
+      }
+    }
+
+    output {
+      elasticsearch {
+        hosts => ["http://elasticsearch:9200"]
+        index => "otel-logs-%{+YYYY.MM.dd}"
+      }
+      stdout { codec => dots }
+    }
