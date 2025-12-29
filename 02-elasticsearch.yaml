@@ -46,6 +46,9 @@ spec:
         resources:
           requests:
             memory: "1.5Gi" # Necesita un poco más que el heap de Java
+        volumeMounts:
+        - name: esdata  # Debe coincidir con el nombre en volumeClaimTemplates
+          mountPath: /usr/share/elasticsearch/data
   volumeClaimTemplates:
   - metadata:
       name: esdata
